@@ -3,11 +3,12 @@ from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
 from tiktoken import get_encoding
 import torch.distributed as dist
+from transformers import AutoTokenizer
 
 
 class TinyStoriesDataset(Dataset):
-    def __init__(self, tokenizer_name="cl100k_base", max_length=512):
-        self.tokenizer = get_encoding(tokenizer_name)
+    def __init__(self, tokenizer_name="cl100k_base", max_length=8192):
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.max_length = max_length
         
         # Load Tiny Stories dataset
@@ -65,8 +66,8 @@ def collate_fn(batch):
     }
 
 
-def get_dataloader(batch_size=8, num_workers=4, max_length=512):
-    dataset = TinyStoriesDataset(max_length=max_length)
+def get_dataloader(batch_size=8, num_workers=4, max_length=8192, tokenizer_name="cl100k_base"):
+    dataset = TinyStoriesDataset(tokenizer_name=tokenizer_name, max_length=max_length)
     
     # Use DistributedSampler for DDP
     sampler = torch.utils.data.distributed.DistributedSampler(

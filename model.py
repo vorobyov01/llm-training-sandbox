@@ -5,7 +5,7 @@ from torch.nn import TransformerEncoder, TransformerEncoderLayer
 
 
 class SimpleTransformer(nn.Module):
-    def __init__(self, vocab_size, d_model=512, nhead=8, num_layers=6, max_len=1024):
+    def __init__(self, vocab_size, d_model=768, nhead=8, num_layers=6, max_len=1024):
         super().__init__()
         self.d_model = d_model
         self.embedding = nn.Embedding(vocab_size, d_model)

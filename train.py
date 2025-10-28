@@ -3,12 +3,14 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.optim import AdamW
 from torch.profiler import profile, record_function, ProfilerActivity
 import argparse
 import time
 from model import SimpleTransformer
 from dataset import get_dataloader
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 
 def setup_ddp():
@@ -41,7 +43,13 @@ def train_step(model, batch, optimizer, device):
     labels = batch["labels"].to(device)
     
     # Forward pass
-    logits = model(input_ids, attention_mask)
+    outputs = model(input_ids, attention_mask=attention_mask)
+    
+    # Extract logits from the output (HuggingFace models return a tuple or CausalLMOutput)
+    if hasattr(outputs, 'logits'):
+        logits = outputs.logits
+    else:
+        logits = outputs[0]  # First element is usually logits
     
     # Calculate loss (shift logits and labels for language modeling)
     shift_logits = logits[..., :-1, :].contiguous()
@@ -63,9 +71,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--num_epochs", type=int, default=1)
-    parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--max_length", type=int, default=8192)
     parser.add_argument("--profile", action="store_true", help="Enable profiling")
     parser.add_argument("--memory_profile", action="store_true", help="Enable memory profiling")
+    parser.add_argument("--memory_profile_steps", type=int, default=3, help="Number of steps to profile (for memory profiling)")
     args = parser.parse_args()
     
     # Setup DDP
@@ -73,31 +82,19 @@ def main():
     
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     
+    # Memory profiler
+    if args.memory_profile and rank == 0:
+        torch.cuda.empty_cache()
+        torch.cuda.memory._record_memory_history(
+            enabled='all',
+            context='all',
+            stacks='all',
+        )
+        print("Memory profiling enabled with full context and stack recording")
+    
     if rank == 0:
         print(f"Training on {world_size} GPUs")
         print(f"Device: {device}")
-    
-    # Model setup
-    vocab_size = 100256  # tiktoken cl100k_base vocab size
-    model = SimpleTransformer(
-        vocab_size=vocab_size,
-        d_model=512,
-        nhead=8,
-        num_layers=6,
-        max_len=args.max_length
-    ).to(device)
-    
-    # Wrap with DDP
-    model = DDP(model, device_ids=[local_rank])
-    
-    # Optimizer
-    optimizer = AdamW(model.parameters(), lr=args.learning_rate)
-    
-    # DataLoader
-    dataloader = get_dataloader(
-        batch_size=args.batch_size,
-        max_length=args.max_length
-    )
     
     # Profiler setup
     if args.profile and rank == 0:
@@ -111,9 +108,30 @@ def main():
         )
         profiler.start()
     
-    # Memory profiler
-    if args.memory_profile and rank == 0:
-        torch.cuda.memory._record_memory_history(enabled=True)
+    # Model setup
+    config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    model = AutoModelForCausalLM.from_config(config).to(device)
+    # model = SimpleTransformer(
+    #     vocab_size=100256,
+    #     d_model=512,
+    #     nhead=8,
+    #     num_layers=6,
+    #     max_len=args.max_length
+    # ).to(device)
+    
+    # Wrap with DDP
+    model = DDP(model, device_ids=[local_rank])
+    # model = FSDP(model)
+    
+    # Optimizer
+    optimizer = AdamW(model.parameters(), lr=args.learning_rate)
+    
+    # DataLoader
+    dataloader = get_dataloader(
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        tokenizer_name="Qwen/Qwen3-0.6B"
+    )
     
     # Training loop
     model.train()
@@ -136,8 +154,12 @@ def main():
                 profiler.step()
             
             # Memory snapshot
-            if args.memory_profile and rank == 0 and step % 50 == 0:
-                torch.cuda.memory._dump_snapshot(f"memory_snapshot_step_{step}.pickle")
+            if args.memory_profile and rank == 0 and step == args.memory_profile_steps:
+                try:
+                    torch.cuda.memory._dump_snapshot(f"memory_snapshot_step_{step}.pickle")
+                except Exception as e:
+                    print(f"Failed to capture memory snapshot {e}")
+                torch.cuda.memory._record_memory_history(enabled=False)
             
             # Limit steps for demo
             if step >= 100:

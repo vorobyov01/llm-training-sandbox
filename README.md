@@ -14,7 +14,11 @@
 ## Установка
 
 ```bash
-pip install -r requirements.txt
+uv venv llm --python 3.11 && source llm/bin/activate && uv pip install --upgrade pip
+```
+
+```bash
+uv pip install -r requirements.txt
 ```
 
 ## Запуск
